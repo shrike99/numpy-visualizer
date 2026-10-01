@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#25272d"/>
+      <stop offset="1" stop-color="#141518"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="52" fill="url(#bg)" stroke="#34373f" stroke-width="3"/>
+    <polygon points="171,73 174,70 208,70 208,104 205,107 205,73" fill="#846b1e"/>
+  <rect x="171" y="73" width="34" height="34" rx="2.5" fill="#efc236" stroke="#a88826" stroke-width="2.5"/>
+  <polygon points="129,73 132,70 166,70 166,104 163,107 163,73" fill="#767a20"/>
+  <rect x="129" y="73" width="34" height="34" rx="2.5" fill="#d7dd3b" stroke="#969b29" stroke-width="2.5"/>
+  <polygon points="87,73 90,70 124,70 124,104 121,107 121,73" fill="#638521"/>
+  <rect x="87" y="73" width="34" height="34" rx="2.5" fill="#b4f23c" stroke="#7ea92a" stroke-width="2.5"/>
+  <polygon points="171,115 174,112 208,112 208,146 205,149 205,115" fill="#7c2c0a"/>
+  <rect x="171" y="115" width="34" height="34" rx="2.5" fill="#e25013" stroke="#9e380d" stroke-width="2.5"/>
+  <polygon points="129,115 132,112 166,112 166,146 163,149 163,115" fill="#874111"/>
+  <rect x="129" y="115" width="34" height="34" rx="2.5" fill="#f6761f" stroke="#ac5316" stroke-width="2.5"/>
+  <polygon points="87,115 90,112 124,112 124,146 121,149 121,115" fill="#875617"/>
+  <rect x="87" y="115" width="34" height="34" rx="2.5" fill="#f69c2a" stroke="#ac6d1e" stroke-width="2.5"/>
+  <polygon points="171,157 174,154 208,154 208,188 205,191 205,157" fill="#430202"/>
+  <rect x="171" y="157" width="34" height="34" rx="2.5" fill="#7a0403" stroke="#550302" stroke-width="2.5"/>
+  <polygon points="129,157 132,154 166,154 166,188 163,191 163,157" fill="#590d03"/>
+  <rect x="129" y="157" width="34" height="34" rx="2.5" fill="#a21805" stroke="#721104" stroke-width="2.5"/>
+  <polygon points="87,157 90,154 124,154 124,188 121,191 121,157" fill="#701804"/>
+  <rect x="87" y="157" width="34" height="34" rx="2.5" fill="#cb2c08" stroke="#8e1f05" stroke-width="2.5"/>
+  <polygon points="145,99 148,96 182,96 182,130 179,133 179,99" fill="#263877"/>
+  <rect x="145" y="99" width="34" height="34" rx="2.5" fill="#4566d9" stroke="#304798" stroke-width="2.5"/>
+  <polygon points="103,99 106,96 140,96 140,130 137,133 137,99" fill="#20214c"/>
+  <rect x="103" y="99" width="34" height="34" rx="2.5" fill="#3a3c8a" stroke="#292a61" stroke-width="2.5"/>
+  <polygon points="61,99 64,96 98,96 98,130 95,133 95,99" fill="#1a0a20"/>
+  <rect x="61" y="99" width="34" height="34" rx="2.5" fill="#30123b" stroke="#220d29" stroke-width="2.5"/>
+  <polygon points="145,141 148,138 182,138 182,172 179,175 179,141" fill="#187272"/>
+  <rect x="145" y="141" width="34" height="34" rx="2.5" fill="#2bcecf" stroke="#1e9091" stroke-width="2.5"/>
+  <polygon points="103,141 106,138 140,138 140,172 137,175 137,141" fill="#186281"/>
+  <rect x="103" y="141" width="34" height="34" rx="2.5" fill="#2cb2eb" stroke="#1e7ca4" stroke-width="2.5"/>
+  <polygon points="61,141 64,138 98,138 98,172 95,175 95,141" fill="#204d7f"/>
+  <rect x="61" y="141" width="34" height="34" rx="2.5" fill="#3a8ce7" stroke="#2862a1" stroke-width="2.5"/>
+  <polygon points="145,183 148,180 182,180 182,214 179,217 179,183" fill="#4a892d"/>
+  <rect x="145" y="183" width="34" height="34" rx="2.5" fill="#87fa52" stroke="#5faf39" stroke-width="2.5"/>
+  <polygon points="103,183 106,180 140,180 140,214 137,217 137,183" fill="#2d8745"/>
+  <rect x="103" y="183" width="34" height="34" rx="2.5" fill="#52f57e" stroke="#3aab58" stroke-width="2.5"/>
+  <polygon points="61,183 64,180 98,180 98,214 95,217 95,183" fill="#1a805c"/>
+  <rect x="61" y="183" width="34" height="34" rx="2.5" fill="#2fe8a8" stroke="#21a375" stroke-width="2.5"/>
+  <line x1="45" y1="83" x2="89.3" y2="38.7" stroke="#ff5f5f" stroke-width="5" stroke-linecap="round"/>
+  <polygon points="95,33 90.8,47.1 80.9,37.2" fill="#ff5f5f" stroke="#ff5f5f" stroke-width="2" stroke-linejoin="round"/>
+  <line x1="45" y1="83" x2="203.0" y2="83.0" stroke="#5f9fff" stroke-width="5" stroke-linecap="round"/>
+  <polygon points="211,83 198.0,90.0 198.0,76.0" fill="#5f9fff" stroke="#5f9fff" stroke-width="2" stroke-linejoin="round"/>
+  <line x1="45" y1="83" x2="45.0" y2="215.0" stroke="#5fdf5f" stroke-width="5" stroke-linecap="round"/>
+  <polygon points="45,223 38.0,210.0 52.0,210.0" fill="#5fdf5f" stroke="#5fdf5f" stroke-width="2" stroke-linejoin="round"/>
+</svg>

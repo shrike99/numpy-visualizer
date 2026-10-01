@@ -1,0 +1,3 @@
+numpy>=1.22
+PyQt6>=6.4
+moderngl>=5.8

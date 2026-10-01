@@ -42,6 +42,7 @@ import contextlib
 import io
 import itertools
 import math
+import os
 import queue
 import re
 import sys
@@ -2542,7 +2543,14 @@ def _dark_theme(app):
 
 def _app():
     QtGui.QSurfaceFormat.setDefaultFormat(_surface_format())
+    if sys.platform == "win32":   # own taskbar entry (and icon) instead of python.exe's
+        with contextlib.suppress(Exception):
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("npviz")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
+    if os.path.exists(icon):
+        app.setWindowIcon(QtGui.QIcon(icon))
     _dark_theme(app)
     return app
 
