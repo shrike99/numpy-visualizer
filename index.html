@@ -392,7 +392,15 @@
 			      postMessage({ type: "status", text: "starting Python..." });
 			      py = await loadPyodide({ indexURL: m.base });
 			      postMessage({ type: "status", text: "loading numpy..." });
-			      await py.loadPackage("numpy");
+			      // loadPackage only logs download failures, so collect them and retry once
+			      let errs = [];
+			      for (let attempt = 0; attempt < 2; attempt++) {
+			        errs = [];
+			        await py.loadPackage("numpy", { errorCallback: (e) => errs.push(String(e)) });
+			        if (!errs.length) break;
+			        postMessage({ type: "status", text: "retrying numpy download..." });
+			      }
+			      if (errs.length) throw new Error("numpy download failed (blocked by an ad blocker or network?): " + errs.join("; "));
 			      py.runPython(m.engine);
 			      api = { run: py.globals.get("api_run"), prep: py.globals.get("api_prepare"),
 			              hover: py.globals.get("api_hover"), examples: py.globals.get("api_examples") };
