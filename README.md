@@ -147,8 +147,8 @@ There are eleven built into the examples menu:
 | sum along an axis | which axis disappears, and `keepdims` |
 | big: 6 million elements | a `(200, 100, 100, 3)` video tensor, transposed, reshaped and averaged |
 
-The [`examples/`](examples) folder has three more (`image_channels.py`, `sorting.py` and
-`tile_repeat_roll.py`). Open one with `python npviz.py examples/<name>.py`.
+The [`examples/`](examples) folder has four more (`image_channels.py`, `rubiks_cube.py`,
+`sorting.py` and `tile_repeat_roll.py`). Open one with `python npviz.py examples/<name>.py`.
 
 ### Transpose vs reshape
 
