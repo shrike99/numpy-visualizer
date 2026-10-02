@@ -131,7 +131,7 @@ NaN and ±inf are drawn in magenta.
 
 ## Examples
 
-There are eleven built into the examples menu:
+There are twelve built into the examples menu:
 
 | Example | What it covers |
 | --- | --- |
@@ -145,6 +145,7 @@ There are eleven built into the examples menu:
 | indexing & slicing | rows, columns, blocks, steps and boolean masks |
 | stack / concatenate | joining along an existing axis or a new one |
 | sum along an axis | which axis disappears, and `keepdims` |
+| rubik's cube | every face turn is `np.rot90` on one slice of a `(3, 3, 3)` cube, and `R U R' U'` six times solves it again |
 | big: 6 million elements | a `(200, 100, 100, 3)` video tensor, transposed, reshaped and averaged |
 
 The [`examples/`](examples) folder has four more (`image_channels.py`, `rubiks_cube.py`,
