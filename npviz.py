@@ -42,7 +42,6 @@ import contextlib
 import io
 import itertools
 import math
-import os
 import queue
 import re
 import sys
@@ -897,16 +896,17 @@ class Layout:
     count: int
 
 
-LAYOUTS = ["numpy order", "image order"]
+LAYOUTS = ["numpy order", "layers first"]
 
 
 def axis_order(nd, order="numpy order"):
     """which axis goes to columns, rows, pages, then outer blocks (repeating columns/rows/pages).
-    numpy order: like print(a) - last axis = columns, 2nd-last = rows, 3rd-last = pages, a[0] is one block.
-    image order: like (height, width, channels) - axis 0 = rows, axis 1 = columns, axis 2 = pages,
-                 axis 3+ = whole cubes side by side (a[..., k] is one cube)."""
-    if order == "image order" and nd >= 2:
-        return [1, 0] + list(range(2, nd))
+    numpy order:  like print(a) - last axis = columns, 2nd-last = rows, 3rd-last = pages, a[0] is one block.
+    layers first: like learnbyvisualize - axis 0 = layers stacked in depth (a[i] is one face), axis 1 = rows,
+                  axis 2 = columns, axis 3 = whole cubes side by side (a[..., k] is one cube), axis 4+ further out.
+    1D and 2D look the same in both; 3D too (pages, rows, columns) - they differ from 4D on."""
+    if order == "layers first" and nd >= 4:
+        return [2, 1, 0] + list(range(nd - 1, 2, -1))
     return list(range(nd - 1, -1, -1))
 
 
@@ -962,6 +962,8 @@ def make_layout(shape, gap=1.5, page=1.4, wrap=True, order="numpy order"):
         hi += pts.max(0)
         n[ax], stv[ax], cols[ax], A[ax], B[ax] = k, int(np.prod(shape[ax + 1:], dtype=np.int64)), cl, a, b
         infos.append(AxisInfo(ax, k, d, lvl, cl, inner=inner))
+        if L == min(nd, 3) - 1:
+            ext0 = ext.copy()                           # size of one block (the first cube)
     c = ((lo + hi) / 2).astype(np.float32)
     # axis arrows: one corner just outside element [0, 0, ...] (top-left-front), every arrow of a level
     # starts there and runs along an edge of the array; outer block levels use a corner further out
@@ -972,6 +974,9 @@ def make_layout(shape, gap=1.5, page=1.4, wrap=True, order="numpy order"):
         # so seen from above they pass behind/above the blocks instead of through them
         z = 0.15 + 0.3 * inf.level if (inf.level == 0 or inf.d == 2) else -inf.inner[2] - 0.15 - 0.3 * inf.level
         origin = -c + np.array([-(0.5 + m), 0.5 + m, z])
+        if inf.level == 0 and inf.d == 0:
+            # columns arrow along the BOTTOM-front edge: along the top its label lands on the pages behind
+            origin = -c + np.array([-0.5, -(ext0[1] + 0.5 + m), z])
         off = (last % inf.cols) * A[inf.ax] + (last // inf.cols) * B[inf.ax]
         span = (1.0 if inf.d < 2 else 0.6) + 2 * m
         inf.start = origin
@@ -1311,8 +1316,8 @@ class Overlay(QtWidgets.QWidget):
             fm = p.fontMetrics()
             tw = fm.horizontalAdvance(text)
             ux, uy = ((dx / ln, dy / ln) if ln > 1e-6 else (1.0, 0.0))
-            if abs(uy) > abs(ux):          # mostly vertical arrow: centre the label past its tip
-                tx, ty = x1 - tw / 2, y1 + (16 if uy > 0 else -8)
+            if abs(uy) > abs(ux):          # mostly vertical arrow: label left of a down tip, above an up tip
+                tx, ty = (x1 - tw - 8, y1 + 4) if uy > 0 else (x1 - tw / 2, y1 - 8)
             elif ux >= 0:
                 tx, ty = x1 + 8, y1 + 4
             else:
@@ -2081,10 +2086,11 @@ class Viz(QtWidgets.QMainWindow):
         self.layout_c = _combo(LAYOUTS)
         self.layout_c.setToolTip("numpy order: like print(a) - last axis = columns, 2nd-last = rows, 3rd-last = pages;\n"
                                  "    a[0] is one block, a[1] the next...\n"
-                                 "image order: like (height, width, channels) - axis 0 = rows, axis 1 = columns,\n"
-                                 "    axis 2 = pages, axis 3+ = whole cubes side by side (a[..., k] is one cube)")
+                                 "layers first: like learnbyvisualize - axis 0 = layers in depth, axis 1 = rows,\n"
+                                 "    axis 2 = columns, axis 3 = whole cubes side by side (a[..., k] is one cube)")
         self._settings = QtCore.QSettings("npviz", "npviz")
-        self.layout_c.setCurrentText(str(self._settings.value("layout", "numpy order")))
+        saved = str(self._settings.value("layout", "numpy order"))
+        self.layout_c.setCurrentText(saved if saved in LAYOUTS else "numpy order")
         self.layout_c.currentTextChanged.connect(lambda t: self._settings.setValue("layout", t))
         self.layout_c.currentIndexChanged.connect(lambda _: self.refresh(fit=True))
         L.addWidget(_row(_lbl("layout"), self.layout_c, 1))
@@ -2543,14 +2549,7 @@ def _dark_theme(app):
 
 def _app():
     QtGui.QSurfaceFormat.setDefaultFormat(_surface_format())
-    if sys.platform == "win32":   # own taskbar entry (and icon) instead of python.exe's
-        with contextlib.suppress(Exception):
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("npviz")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
-    if os.path.exists(icon):
-        app.setWindowIcon(QtGui.QIcon(icon))
     _dark_theme(app)
     return app
 
