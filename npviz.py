@@ -198,6 +198,62 @@ for _ in range(6):
     back = R(back, -1)
     back = U(back, -1)
 """,
+    "new": """\
+# What's new: loops, your own functions, in-place writes, unpacking, containers, try / with.
+# The last column of the step list says which pass (or function) a step came from.
+a = np.arange(12).reshape(3, 4)
+
+# 1. loops: every pass gets its own steps
+for row in a:                 # row is a[0], then a[1], then a[2]
+    doubled = row * 2
+
+total = np.zeros(4, dtype=int)
+i = 0
+while i < 3:
+    total = total + a[i]      # a running sum, one step per pass
+    i += 1
+
+# 2. in-place writes: only the elements that change pop out and back in (SET)
+b = a.copy()
+b[1, 1:3] = -1                # 2 of the 12 change
+b[b > 8] *= 10                # just the big ones
+for j in range(4):
+    if j % 2:
+        continue              # odd columns are skipped
+    b[:, j] = 0
+
+# 3. unpacking: each result is linked to where its elements came from
+left, right = np.hsplit(a, 2)
+q, r = divmod(a, 5)
+
+# 4. your own functions: the steps inside them show up too (untick "functions" to hide them)
+def flip_rows(m):
+    m = m.copy()
+    m[[0, -1]] = m[[-1, 0]]   # swap the first and last rows
+    return m
+
+f = flip_rows(a)
+
+# 5. arrays inside dicts, lists and your own objects are followed as well
+parts = {"even": a[:, ::2], "odd": a[:, 1::2]}
+parts["sum"] = parts["even"] + parts["odd"]
+views = [a.T, a.ravel()]
+
+class Box:
+    pass
+
+box = Box()
+box.grid = np.zeros((3, 4), dtype=int)
+box.grid[1] = a[1]            # copy one row of a in
+
+# 6. try / except / with run step by step as well
+try:
+    last = a[5]               # there is no row 5...
+except IndexError:
+    last = a[-1]              # ...so take the last row instead
+with np.errstate(divide="ignore"):
+    inv = 1 / a               # 1/0 gives inf, without a warning
+""",
     "big: 6 million elements": """\
 rng = np.random.default_rng(0)
 v = rng.random((200, 100, 100, 3))   # 200 frames of 100x100 RGB
@@ -546,6 +602,7 @@ class Step:
     env: dict = None           # other variables at that moment (shallow)
     mem: str = ""
     loop: str = ""             # which pass of the loop(s) around it, e.g. "i=2" or "pass 3"
+    changed: np.ndarray = None # kind "set": which (flat) elements got a new value
     # filled in lazily by analyse()
     analysed: bool = False
     kind: str = ""
@@ -571,17 +628,70 @@ def analyse(steps, i):
         analyse(steps, j)
     if st.cand:
         names = [n for n, _ in st.cand]
+        keys = [n if n.isidentifier() else f"_npviz_src{k}" for k, n in enumerate(names)]   # d['x'] -> a name
+        expr = _rename(st.expr, dict(zip(names, keys))) if st.expr and keys != names else st.expr
         srcs = [steps[j].raw for _, j in st.cand]
         env = dict(st.env)
-        for n, j in st.cand:
-            env[n] = steps[j].raw
-        kind, prov, red, used = relate(st.expr, env, names, srcs, st.raw, hint=st.label)
+        env["_K"], env["_npviz_set"] = _KeyGrab(), _npviz_set
+        for key, (_, j) in zip(keys, st.cand):
+            env[key] = steps[j].raw
+        kind, prov, red, used = relate(expr, env, keys, srcs, st.raw, hint=st.label)
         st.kind, st.prov, st.red = kind, prov, red
-        st.srcs = [(n, j) for n, j in st.cand if n in used]
+        st.srcs = [(n, j) for (n, j), key in zip(st.cand, keys) if key in used]
+        _drop_unused(st, steps)
+        _mark_set(st, steps)
     else:
         st.kind = "new"
     st.desc = describe(st, steps)
     st.analysed = True
+
+
+def _drop_unused(st, steps):
+    """x, y = c, b: both arrays were candidates, but y only took elements from b."""
+    if st.kind != "move" or len(st.srcs) < 2:
+        return
+    sizes = [steps[j].raw.size for _, j in st.srcs]
+    offs = np.cumsum([0] + sizes)
+    p = st.prov
+    keep = [k for k in range(len(sizes)) if np.any((p >= offs[k]) & (p < offs[k + 1]))]
+    if not keep or len(keep) == len(sizes):
+        return
+    new = np.full(p.shape, -1, p.dtype)
+    off = 0
+    for k in keep:
+        m = (p >= offs[k]) & (p < offs[k + 1])
+        new[m] = p[m] - offs[k] + off
+        off += sizes[k]
+    st.prov, st.srcs = new, [st.srcs[k] for k in keep]
+
+
+def _mark_set(st, steps):
+    """an array changed in place where only some elements got a new value -> kind "set"."""
+    if not st.srcs or st.srcs[0][0] != st.name:
+        return
+    P, R = steps[st.srcs[0][1]].raw, st.raw
+    if P.shape != R.shape or R.size < 2:
+        return
+    if st.kind == "elementwise":
+        p, r = P.reshape(-1), R.reshape(-1)
+        try:
+            same = p == r
+            if p.dtype.kind in "fc" and r.dtype.kind in "fc":
+                same |= np.isnan(p) & np.isnan(r)
+        except Exception:
+            return
+        ch = ~np.asarray(same, bool)
+    elif st.kind == "move":
+        ch = st.prov != np.arange(R.size)
+        if not ch.any() or (st.prov[ch] >= 0).any():
+            return                                   # something moved: keep showing it as a move
+        if ch.all():
+            st.kind, st.prov = "elementwise", None   # a[:] = 0: every value is new
+            return
+    else:
+        return
+    if 0 < np.count_nonzero(ch) < R.size:
+        st.kind, st.changed = "set", ch
 
 
 def origin_of(steps, i):
@@ -593,7 +703,7 @@ def origin_of(steps, i):
         if st.kind == "move":
             pool = np.concatenate([origin_of(steps, j) for _, j in st.srcs])
             st._origin = np.where(st.prov >= 0, pool[np.maximum(st.prov, 0)], -1).astype(np.float32)
-        elif st.kind == "elementwise":
+        elif st.kind in ("elementwise", "set"):
             st._origin = origin_of(steps, st.parent)
         else:
             st._origin = np.linspace(0, 1, n, dtype=np.float32) if n > 1 else np.zeros(n, np.float32)
@@ -665,7 +775,11 @@ def describe(st, steps):
         if others:
             head, body = "COMBINE", f"{R.size} elements: {used0} from {pn}, " + ", ".join(others) + "."
         elif R.size == n0 and used0 == n0 and not dup and not new:
-            head, body = "REARRANGE", f"Same {n0} elements in a NEW order - every element moved (follow the colours)."
+            moved = int(np.count_nonzero(prov != np.arange(n0)))
+            head, body = "REARRANGE", (f"Same {n0} elements in a NEW order - every element moved (follow the colours)."
+                                       if moved == n0 else
+                                       f"Same {n0} elements in a NEW order - {moved} moved, the other {n0 - moved} "
+                                       f"stayed where they were.")
         elif used0 < n0 and not dup and not new:
             head, body = "SELECT", f"Picked {used0} of {n0} elements, the other {n0 - used0} are dropped."
         else:
@@ -682,6 +796,10 @@ def describe(st, steps):
         k = P.size // max(R.size, 1)
         return (f"REDUCE over axis {axs}  {sh}\nEach output = {name or 'f'}( {k} elements along axis {axs} )"
                 + (" - keepdims leaves a length-1 axis" if kd else " - that axis disappears") + ".")
+    if st.kind == "set":
+        n = int(np.count_nonzero(st.changed))
+        return (f"SET  {sh}\n{n} of {R.size} elements got a new value (they pop out and back in), "
+                f"the other {R.size - n} kept theirs.")
     if st.kind == "elementwise":
         return f"ELEMENTWISE  {sh}\nNothing moved, the values changed."
     return f"NEW ARRAY  {sh}\nNo element-to-element link found."
@@ -731,10 +849,14 @@ class _Continue(Exception):
     pass
 
 
-class _Stop(Exception):
-    """a statement raised: the error is already in the console, stop the run."""
-    def __init__(self, line):
-        self.line = line
+class _Raised(Exception):
+    """your code raised exc on this line (an except: in your code may still catch it)."""
+    def __init__(self, exc, line):
+        self.exc, self.line = exc, line
+
+
+class _Timeout(BaseException):
+    """not an Exception, so an 'except Exception:' in your code can't swallow it."""
 
 
 def _escapes(node):
@@ -749,7 +871,8 @@ def _escapes(node):
 
 
 def _steppable(node):
-    """loops are run one pass at a time, unless a break/continue hides in a try/with/... inside them."""
+    """loops are run one pass at a time, unless a break/continue hides somewhere npviz doesn't step
+    through (a match, an async with, ...)."""
     return isinstance(node, (ast.For, ast.While)) and _plain_ok(node.body) and _plain_ok(node.orelse)
 
 
@@ -758,12 +881,29 @@ def _plain_ok(body):
         if isinstance(n, ast.If):
             if not (_plain_ok(n.body) and _plain_ok(n.orelse)):
                 return False
+        elif isinstance(n, ast.Try):
+            if not all(_plain_ok(b) for b in [n.body, n.orelse, n.finalbody] + [h.body for h in n.handlers]):
+                return False
+        elif isinstance(n, ast.With):
+            if not _plain_ok(n.body):
+                return False
         elif isinstance(n, (ast.For, ast.While)):
             if not (_steppable(n) or not _escapes(n)):
                 return False
         elif not isinstance(n, (ast.Break, ast.Continue)) and _escapes(n):
             return False
     return True
+
+
+def _where(ctx):
+    """'pass 2, in turn()'; a function calling itself shows as 'in rec() x3'."""
+    out = []
+    for c in ctx:
+        if out and out[-1][0] == c and c.startswith("in "):
+            out[-1][1] += 1
+        else:
+            out.append([c, 1])
+    return ", ".join(c if n == 1 else f"{c} x{n}" for c, n in out)
 
 
 def _pass_text(target, item, k):
@@ -776,11 +916,92 @@ def _pass_text(target, item, k):
 
 
 def _names_in(node, env):
+    """the arrays an expression reads: variables, and l[0] / d['x'] / obj.arr inside containers."""
     out = []
     for n in ast.walk(node):
-        if isinstance(n, ast.Name) and n.id not in out and numeric(env.get(n.id)):
-            out.append(n.id)
+        if isinstance(n, ast.Name):
+            key = n.id if numeric(env.get(n.id)) else None
+        else:
+            key = _item_key(n)
+            if key is not None and not numeric(_lookup(env, key)):
+                key = None
+        if key is not None and key not in out:
+            out.append(key)
     return out[:4]
+
+
+def _items(name, v):
+    """[(name, item)] one level inside a list, tuple, dict or one of your own objects."""
+    try:
+        if isinstance(v, (list, tuple)) and len(v) <= 16:
+            return [(f"{name}[{k}]", x) for k, x in enumerate(v)]
+        if isinstance(v, dict) and len(v) <= 16:
+            return [(f"{name}[{k!r}]", x) for k, x in v.items()
+                    if isinstance(k, (str, int)) and not isinstance(k, bool)]
+        if type(v).__module__ == "__npviz__" and not isinstance(v, type) and hasattr(v, "__dict__"):
+            return [(f"{name}.{k}", x) for k, x in vars(v).items() if not k.startswith("_")]
+    except Exception:
+        pass
+    return []
+
+
+def _tracked(ns):
+    """every array a statement can reach by name -> {name: value}: variables, plus l[0], d['x'] and
+    obj.arr one level into containers (unless that array is a variable already)."""
+    out, seen = {}, set()
+    for name, v in ns.items():
+        if not name.startswith("_") and _as_array(v) is not None:
+            out[name] = v
+            seen.add(id(v))
+    for name, v in ns.items():
+        if name.startswith("_") or name in out or isinstance(v, (np.ndarray, np.generic)):
+            continue
+        for key, x in _items(name, v):
+            if _as_array(x) is not None and id(x) not in seen:
+                out[key] = x
+                seen.add(id(x))
+    return out
+
+
+def _item_key(n):
+    """d['x'] / l[0] / obj.arr as written in the code -> the name _items gives it (or None)"""
+    if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+        return f"{n.value.id}.{n.attr}"
+    if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and isinstance(n.slice, ast.Constant) \
+            and isinstance(n.slice.value, (str, int)) and not isinstance(n.slice.value, bool):
+        return f"{n.value.id}[{n.slice.value!r}]"
+    return None
+
+
+def _lookup(env, key):
+    """value of a variable or of a container item name (d['x'], obj.arr), or None"""
+    if key in env:
+        return env[key]
+    m = re.match(r"^([A-Za-z_]\w*)", key)
+    if not m or m.group(1) not in env:
+        return None
+    return next((x for k, x in _items(m.group(1), env[m.group(1)]) if k == key), None)
+
+
+def _rename(expr, names):
+    """rewrite d['x'] / obj.arr in expr as plain names, so it can be re-run with ids in their place."""
+    class T(ast.NodeTransformer):
+        def visit(self, node):
+            k = _item_key(node)
+            if k in names:
+                return ast.copy_location(ast.Name(names[k], ast.Load()), node)
+            return super().visit(node)
+    try:
+        return ast.unparse(T().visit(ast.parse(expr, mode="eval")))
+    except Exception:
+        return expr
+
+
+def _npviz_set(a, key, v):
+    """a copy of a with a[key] = v: how 'c[0] = np.rot90(c[0])' is re-run to follow the elements."""
+    a = np.array(a, copy=True)
+    a[key] = v
+    return a
 
 
 @dataclass
@@ -795,11 +1016,14 @@ class Runner:
     """Runs code statement by statement and records every array change as a Step.
     Keeps the state after every statement, so a re-run only executes from the first changed line."""
 
-    def __init__(self, max_steps=400, timeout=10.0, max_passes=100):
+    def __init__(self, max_steps=400, timeout=10.0, max_passes=100, max_fn_steps=150):
         self.max_steps = max_steps
         self.timeout = timeout
         self.max_passes = max_passes     # passes of one loop shown one by one, the rest run in one go
+        self.max_fn_steps = max_fn_steps # steps recorded inside your own functions, per run
+        self.into_funcs = True           # record steps inside your own functions too
         self.segs, self.snaps, self.steps, self.console = [], [], [], []
+        self._into = True
 
     def _fresh(self):
         return {"np": np, "numpy": np, "__name__": "__npviz__"}
@@ -831,6 +1055,8 @@ class Runner:
             tree = ast.parse(code)
         except SyntaxError as e:
             return None, [f"line {e.lineno}: SyntaxError: {e.msg}"], e.lineno, 0
+        if self.into_funcs != self._into:      # switching function steps on/off: nothing can be re-used
+            self.segs, self.snaps, self._into = [], [], self.into_funcs
         nodes = tree.body
         segs = [((ast.get_source_segment(code, n) or ""), n.lineno) for n in nodes]
         k = 0
@@ -854,6 +1080,7 @@ class Runner:
                 shared.setdefault(id(st.raw), (st.raw, []))[1].append(i)
         out = io.StringIO()
         err = None
+        ctx = []         # the pass of every loop (and the function) we're inside, for Step.loop
 
         def flush():
             s = out.getvalue()
@@ -862,15 +1089,24 @@ class Runner:
                 out.seek(0)
                 out.truncate()
 
-        def add(name, label, line, val, expr, src_names, before, inplace=False):
+        def add(name, label, line, val, expr, src_names, before, inplace=False, lat=None):
+            """lat: the names visible there (a function's locals); None = the top level.
+            Steps inside functions keep a copy, nothing protects a function's locals."""
             if len(steps) >= self.max_steps:
                 return None
-            cand = [(n, latest[n][1]) for n in src_names if n in latest]
-            st = Step(name, label, line, val, expr=expr, cand=cand, env=before, loop=", ".join(ctx))
-            st.mem = _mem_note(val, [before[n] for n, _ in cand if n in before], [n for n, _ in cand], inplace) \
-                if cand else "new array"
+            cand = []
+            for n in src_names:
+                if lat is not None and n in lat:
+                    cand.append((n, lat[n][1]))
+                elif n in latest:
+                    cand.append((n, latest[n][1]))
+            st = Step(name, label, line, val if lat is None else np.array(val, copy=True), expr=expr, cand=cand,
+                      env=before, loop=_where(ctx), live=lat is None)
+            olds = [o for o in (_lookup(before, n) for n, _ in cand) if o is not None]
+            st.mem = _mem_note(val, olds, [n for n, _ in cand], inplace) if cand else "new array"
             steps.append(st)
-            shared.setdefault(id(val), (val, []))[1].append(len(steps) - 1)
+            if lat is None:
+                shared.setdefault(id(val), (val, []))[1].append(len(steps) - 1)
             return len(steps) - 1
 
         def protect(objs):
@@ -885,13 +1121,145 @@ class Runner:
                     done.append((obj, cp, idxs))
             return done
 
+        def link(node, name, before, line):
+            """-> (expr, source names) when the statement says where name's new value came from."""
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                t, rhs = node.targets[0], ast.get_source_segment(code, node.value)
+                if rhs is None:
+                    return None, None
+                src = _names_in(node.value, before)
+                if isinstance(t, (ast.Name, ast.Subscript, ast.Attribute)) and ast.unparse(t) == name:
+                    return rhs, src
+                if isinstance(t, ast.Name) and name.startswith(t.id + "[") and                         isinstance(node.value, (ast.Dict, ast.List, ast.Tuple)):
+                    v = node.value                        # parts = {"even": a[:, ::2]} -> parts['even'] is a[:, ::2]
+                    pairs = zip(v.keys, v.values) if isinstance(v, ast.Dict) else                         ((ast.Constant(j), e) for j, e in enumerate(v.elts))
+                    for kn, e in pairs:
+                        if isinstance(kn, ast.Constant) and f"{t.id}[{kn.value!r}]" == name:
+                            seg = ast.get_source_segment(code, e)
+                            return (seg, _names_in(e, before)) if seg else (None, None)
+                if isinstance(t, (ast.Tuple, ast.List)) and not any(isinstance(e, ast.Starred) for e in t.elts):
+                    for j, e in enumerate(t.elts):        # b, c = np.split(a, 2) -> b is (np.split(a, 2))[0]
+                        if ast.unparse(e) == name:
+                            return f"({rhs})[{j}]", src
+                if isinstance(t, ast.Subscript) and ast.unparse(t.value) == name:
+                    # c[0] = np.rot90(c[0]): re-run as a copy with that part replaced, so moved elements are followed
+                    whole = ast.unparse(t)
+                    key = "_K" + whole[len(ast.unparse(t.value)):]
+                    return f"_npviz_set({name}, {key}, {rhs})", [name] + [n for n in src if n != name]
+            return None, None
+
+        # ------------------------------------------------------------------ steps inside your own functions
+        stmt_at = {}     # line -> innermost statement starting on it
+        for n in ast.walk(tree):
+            if isinstance(n, ast.stmt):
+                stmt_at[n.lineno] = n
+        frames = {}      # id(frame) -> [function name, latest, line run last, locals before it]
+        made_in_fn = {}  # id(array) -> (array, step): the last step an array got inside a function
+        fn_steps = [0]
+
+        def fn_room():
+            return self.into_funcs and fn_steps[0] < self.max_fn_steps and len(steps) < self.max_steps * 3 // 4
+
+        def fn_add(name, label, line, v, expr, src, before, lat, inplace=False):
+            if v.size > 2_000_000:
+                return None
+            i = add(name, label, line, v, expr, src, before, inplace, lat=lat)
+            if i is not None:
+                fn_steps[0] += 1
+                made_in_fn[id(v)] = (v, i)
+            return i
+
+        def known(v):
+            """a step that already shows this exact array (the caller's variable, or another function's result)"""
+            hit = made_in_fn.get(id(v))
+            if hit is not None and hit[0] is v:
+                return hit[1]
+            for obj, si, *_ in latest.values():
+                if obj is v:
+                    return si
+            for f in frames.values():
+                for obj, si, *_ in f[1].values():
+                    if obj is v:
+                        return si
+            return None
+
+        def fn_enter(frame):
+            loc = dict(frame.f_locals)
+            lat, name = {}, frame.f_code.co_name
+            ctx.append(f"in {name}()")
+            frames[id(frame)] = [name, lat, None, loc]
+            first = frame.f_code.co_firstlineno
+            label = (code.split("\n")[first - 1] if first <= code.count("\n") + 1 else "").strip()
+            for p, v0 in loc.items():
+                if not isinstance(v0, np.ndarray) or not numeric(v0):
+                    continue
+                j = known(v0)
+                if j is not None and _same(v0, steps[j].raw):
+                    lat[p] = (v0, j, v0)
+                    continue
+                j = fn_add(p, label, first, v0, None, [], {**ns, **loc}, lat)
+                if j is not None:
+                    lat[p] = (v0, j, v0)
+
+        def fn_line(frame, f):
+            """the line that just ran in a function: record the arrays it made or changed."""
+            _, lat, line, before = f
+            loc = dict(frame.f_locals)
+            if line is not None and fn_room():
+                node = stmt_at.get(line)
+                simple = node is not None and not isinstance(node, (ast.For, ast.While, ast.If, ast.With, ast.Try))
+                seg = (ast.get_source_segment(code, node) or "") if node is not None else ""
+                if not simple:
+                    seg = seg.split("\n")[0].strip()
+                env = {**ns, **before}
+                for name, v0 in loc.items():
+                    v = None if name.startswith("_") else _as_array(v0)
+                    if v is None or (isinstance(v0, np.generic) and isinstance(node, ast.For)):
+                        continue
+                    old = lat.get(name)
+                    if old is not None and old[2] is v0 and (v is not v0 or _same(v, steps[old[1]].raw)):
+                        continue
+                    expr, src = link(node, name, env, line) if simple else (None, None)
+                    if src is None:
+                        src = [name] if old is not None else []
+                    j = fn_add(name, seg, line, v, expr, src, env, lat, inplace=old is not None and old[0] is v)
+                    if j is not None:
+                        lat[name] = (v, j, v0)
+            f[2], f[3] = frame.f_lineno, loc
+
         deadline = time.perf_counter() + self.timeout
 
-        def tracer(frame, event, arg):        # only your own code is traced, numpy internals are not
+        def timed_out():
             if time.perf_counter() > deadline:
-                raise TimeoutError(f"stopped after {self.timeout:.0f} s - is there an infinite loop?")
-            return tracer if frame.f_code.co_filename.startswith("line ") else None
+                raise _Timeout(f"stopped after {self.timeout:.0f} s - is there an infinite loop?")
 
+        def in_fn(frame, event, arg):
+            timed_out()
+            f = frames.get(id(frame))
+            if f is not None and event in ("line", "return"):
+                try:
+                    fn_line(frame, f)
+                except Exception:             # a bookkeeping problem must never break your code
+                    pass
+                if event == "return":
+                    del frames[id(frame)]
+                    ctx.pop()
+            return in_fn
+
+        def tracer(frame, event, arg):        # only your own code is traced, numpy internals are not
+            timed_out()
+            c = frame.f_code
+            if not c.co_filename.startswith("line "):
+                return None
+            if event == "call" and c.co_name[:1] != "<" and not c.co_flags & 0x2A0 and fn_room():
+                try:                          # 0x2A0: generators / coroutines are just run
+                    fn_enter(frame)
+                except Exception:             # half set up is fine: in_fn still pops ctx on return
+                    pass
+                return in_fn
+            return tracer
+
+        # ------------------------------------------------------------------ one statement
         codes = {}
 
         def compiled(node, mode, line):
@@ -901,13 +1269,20 @@ class Runner:
                 c = codes[id(node)] = (node, compile(tree, f"line {line}", mode))
             return c[1]
 
-        def fail(line, e):
-            flush()
-            console.append(f"line {line}: {type(e).__name__}: {e}")
-            raise _Stop(line)
+        def call(line, fn, *args):
+            """run a bit of your code that isn't a statement (next() on your generator, __enter__, ...)"""
+            try:
+                return fn(*args)
+            except Exception as e:
+                raise _Raised(e, line)
+
+        quiet = {}       # loop variable -> the numpy scalar the loop put in it (not worth a step each pass)
+        targets = []     # names the running loops assign to
+        at = [0]         # line being run, for the timeout message
 
         def stmt(node, seg, line, show=True, exprs=None):
             """run one statement and record every array it made or changed -> value of an expression."""
+            at[0] = line
             before = dict(ns)
             level = _safety(node)
             guarded = []
@@ -915,7 +1290,14 @@ class Runner:
                 guarded = protect([o for o, _ in shared.values()])
             elif level == "local":
                 names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-                guarded = protect([ns[n] for n in names if isinstance(ns.get(n), np.ndarray)])
+                objs = []
+                for n in names:
+                    v = ns.get(n)
+                    if isinstance(v, np.ndarray):
+                        objs.append(v)
+                    else:
+                        objs += [x for _, x in _items(n, v) if isinstance(x, np.ndarray)]
+                guarded = protect(objs)
             try:
                 with contextlib.redirect_stdout(out):
                     if isinstance(node, ast.Expr):
@@ -924,8 +1306,9 @@ class Runner:
                         exec(compiled(node, "exec", line), ns)
                         val = None
             except Exception as e:
-                fail(line, e)
-            flush()
+                raise _Raised(e, line)
+            finally:
+                flush()
             if isinstance(node, ast.Expr) and show:
                 v = np.asarray(val) if isinstance(val, np.generic) and not isinstance(val, (np.str_, np.bytes_)) else val
                 if numeric(v):
@@ -941,10 +1324,12 @@ class Runner:
                     shared.setdefault(id(obj), (obj, []))[1].extend(idxs)
                 else:
                     changed_objs.add(id(obj))
-            # every ndarray variable that is new or changed becomes a step
-            for name, v0 in list(ns.items()):
-                v = None if name.startswith("_") else _as_array(v0)
-                if v is None:
+            # every array that is new or changed becomes a step (variables, and l[0] / d['x'] / obj.arr)
+            cur = _tracked(ns)
+            for name, v0 in cur.items():
+                v = _as_array(v0)
+                if isinstance(v0, np.generic) and (name in targets or quiet.get(name) is v0):
+                    quiet[name] = v0
                     continue
                 if v is not v0:                      # a numpy scalar: compare by the scalar object
                     old = latest.get(name)
@@ -959,92 +1344,108 @@ class Runner:
                         ost.raw, ost.live = v, True
                         shared.setdefault(id(v), (v, []))[1].append(old[1])
                         continue
-                expr, src = None, []
-                if exprs and name in exprs:
-                    expr, src = exprs[name]
-                elif isinstance(node, ast.Assign) and len(node.targets) == 1 and \
-                        isinstance(node.targets[0], ast.Name) and node.targets[0].id == name:
-                    expr, src = ast.get_source_segment(code, node.value), _names_in(node.value, before)
-                elif old is not None:
-                    src = [name]
+                expr, src = exprs[name] if exprs and name in exprs else link(node, name, before, line)
+                if src is None:
+                    src = [name] if old is not None else []
                 i = add(name, seg, line, v, expr, src, before, inplace=old is not None and old[0] is v)
                 if i is not None:
                     latest[name] = (v, i, v0)
-            for name in [n for n in latest if _as_array(ns.get(n)) is None]:
+            for name in [n for n in latest if n not in cur]:
                 del latest[name]
             return val
 
         def evaluate(expr, line, seg):
             return stmt(ast.copy_location(ast.Expr(expr), expr), seg, line, show=False)
 
+        binders = {}
+
+        def bind(target, value, line, seg, exprs=None):
+            """target = value (a loop variable, 'with ... as x', 'except ... as e')"""
+            node = binders.get(id(target))
+            if node is None or node[0] is not target:
+                a = ast.Assign([target], ast.Name("__npviz_item", ast.Load()))
+                node = binders[id(target)] = (target, ast.fix_missing_locations(ast.copy_location(a, target)))
+            ns["__npviz_item"] = value
+            try:
+                stmt(node[1], seg, line, exprs=exprs)
+            finally:
+                ns.pop("__npviz_item", None)
+
         def head(node):
             return (ast.get_source_segment(code, node) or "").split("\n")[0].strip()
 
+        # ------------------------------------------------------------------ if / for / while / try / with
         def block(body):
             for node in body:
                 run_node(node)
+
+        handling = []    # exceptions being handled, for a bare 'raise'
 
         def run_node(node):
             if isinstance(node, ast.Break):
                 raise _Break
             if isinstance(node, ast.Continue):
                 raise _Continue
+            if isinstance(node, ast.Raise) and node.exc is None and handling:
+                raise handling[-1]
             if isinstance(node, ast.If):
                 block(node.body if evaluate(node.test, node.lineno, head(node)) else node.orelse)
             elif _steppable(node):
                 loop(node)
+            elif isinstance(node, ast.Try):
+                run_try(node)
+            elif isinstance(node, ast.With):
+                run_with(node, node.items)
             else:
                 stmt(node, ast.get_source_segment(code, node) or "", node.lineno)
 
         passes = {}      # loop node -> passes shown one by one so far
-        ctx = []         # the pass of every loop we're inside, for Step.loop
 
         def loop(node):
             """run a for/while loop one pass at a time, so every pass gets its own steps."""
             line, top = node.lineno, head(node)
             is_for = isinstance(node, ast.For)
             it = None
+            names = []
             if is_for:
                 obj = evaluate(node.iter, line, top)
-                try:
-                    it = iter(obj)
-                except Exception as e:
-                    fail(line, e)
-                assign = ast.fix_missing_locations(ast.copy_location(
-                    ast.Assign([node.target], ast.Name("__npviz_item", ast.Load())), node))
+                it = call(line, iter, obj)
+                names = [n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)]
                 # for row in a: -> row is a[k], so its step shows where the row came from
                 by_index = isinstance(obj, np.ndarray) and isinstance(node.target, ast.Name) and \
                     isinstance(node.iter, ast.Name)
             k = 0
-            while True:
-                if passes.get(id(node), 0) >= self.max_passes or len(steps) >= self.max_steps * 3 // 4:
-                    rest(node, it, k)
-                    return
-                if is_for:
-                    try:
-                        item = next(it)
-                    except StopIteration:
-                        break
-                    except Exception as e:
-                        fail(line, e)
-                elif not evaluate(node.test, line, top):
-                    break
-                passes[id(node)] = passes.get(id(node), 0) + 1
-                ctx.append(_pass_text(node.target, item, k) if is_for else f"pass {k + 1}")
-                try:
+            targets.extend(names)
+            try:
+                while True:
+                    if passes.get(id(node), 0) >= self.max_passes or len(steps) >= self.max_steps * 3 // 4:
+                        rest(node, it, k)
+                        return
                     if is_for:
-                        ns["__npviz_item"] = item
-                        ex = {node.target.id: (f"{node.iter.id}[{k}]", [node.iter.id])} if by_index else None
-                        stmt(assign, top, line, exprs=ex)
-                    block(node.body)
-                except _Continue:
-                    pass
-                except _Break:
-                    return
-                finally:
-                    ctx.pop()
-                    ns.pop("__npviz_item", None)
-                k += 1
+                        try:
+                            item = call(line, next, it)
+                        except _Raised as r:
+                            if isinstance(r.exc, StopIteration):
+                                break
+                            raise
+                    elif not evaluate(node.test, line, top):
+                        break
+                    passes[id(node)] = passes.get(id(node), 0) + 1
+                    ctx.append(_pass_text(node.target, item, k) if is_for else f"pass {k + 1}")
+                    try:
+                        if is_for:
+                            ex = {node.target.id: (f"{node.iter.id}[{k}]", [node.iter.id])} if by_index else None
+                            bind(node.target, item, line, top, exprs=ex)
+                        block(node.body)
+                    except _Continue:
+                        pass
+                    except _Break:
+                        return
+                    finally:
+                        ctx.pop()
+                    k += 1
+            finally:
+                del targets[len(targets) - len(names):]
             block(node.orelse)
 
         def rest(node, it, k):
@@ -1066,6 +1467,58 @@ class Runner:
             if ns.pop("__npviz_else", False):
                 block(node.orelse)
 
+        def run_try(node):
+            def body():
+                try:
+                    block(node.body)
+                except _Raised as r:
+                    for h in node.handlers:
+                        if h.type is None or isinstance(r.exc, evaluate(h.type, h.lineno, head(h))):
+                            break
+                    else:
+                        raise
+                    if h.name:
+                        ns[h.name] = r.exc
+                    handling.append(r)
+                    try:
+                        block(h.body)
+                    finally:
+                        handling.pop()
+                        if h.name:
+                            ns.pop(h.name, None)
+                else:
+                    block(node.orelse)
+            try:
+                body()
+            except _Timeout:
+                raise
+            except BaseException:
+                block(node.finalbody)
+                raise
+            block(node.finalbody)
+
+        def run_with(node, items):
+            if not items:
+                block(node.body)
+                return
+            line = node.lineno
+            mgr = evaluate(items[0].context_expr, line, head(node))
+            val = call(line, type(mgr).__enter__, mgr)
+            if items[0].optional_vars is not None:
+                bind(items[0].optional_vars, val, line, head(node))
+            try:
+                run_with(node, items[1:])
+            except _Raised as r:
+                if not call(line, type(mgr).__exit__, mgr, type(r.exc), r.exc, r.exc.__traceback__):
+                    raise
+            except _Timeout:
+                raise
+            except BaseException:         # break / continue leave the block normally
+                call(line, type(mgr).__exit__, mgr, None, None, None)
+                raise
+            else:
+                call(line, type(mgr).__exit__, mgr, None, None, None)
+
         old_trace = sys.gettrace()
         sys.settrace(tracer)
         try:
@@ -1073,14 +1526,24 @@ class Runner:
                 node = nodes[si]
                 try:
                     run_node(node)
-                except _Stop as e:
-                    err = e.line
+                except _Raised as r:
+                    flush()
+                    console.append(f"line {r.line}: {type(r.exc).__name__}: {r.exc}")
+                    err = r.line
+                    break
+                except _Timeout as e:
+                    flush()
+                    console.append(f"line {at[0]}: TimeoutError: {e}")
+                    err = at[0]
                     break
                 except (_Break, _Continue) as e:
                     word = "break" if isinstance(e, _Break) else "continue"
                     console.append(f"line {node.lineno}: SyntaxError: '{word}' outside loop")
                     err = node.lineno
                     break
+                finally:
+                    frames.clear()
+                    del ctx[:]
                 snaps.append(_Snap(dict(ns), dict(latest), len(steps), len(console)))
         finally:
             sys.settrace(old_trace)
@@ -1298,7 +1761,7 @@ def build_transition(P, Q, GP, GQ):
     n0, nq = len(GP.sv), len(GQ.sv)
     i32 = np.int32
     if GP.sub > 1 or GQ.sub > 1:
-        kind = "elementwise" if (kind == "elementwise" and GP.dshape == GQ.dshape) else "fade"
+        kind = "elementwise" if (kind in ("elementwise", "set") and GP.dshape == GQ.dshape) else "fade"
     if kind == "move":
         prov = Q.prov.astype(i32, copy=False)
         newm = (prov < 0) | (prov >= n0)
@@ -1316,6 +1779,10 @@ def build_transition(P, Q, GP, GQ):
         ref, dref = np.arange(n0, dtype=i32), reduce_map(P.raw.shape, ax, Q.raw.size).astype(i32, copy=False)
     elif kind == "elementwise" and n0 == nq:
         ref = dref = np.arange(n0, dtype=i32)
+    elif kind == "set" and n0 == nq:              # changed elements shrink away and grow back in
+        same, diff = np.flatnonzero(~Q.changed).astype(i32), np.flatnonzero(Q.changed).astype(i32)
+        none = np.full(diff.size, -1, i32)
+        ref, dref = np.concatenate([same, diff, none]), np.concatenate([same, none, diff])
     else:
         ref = np.concatenate([np.arange(n0, dtype=i32), np.full(nq, -1, i32)])
         dref = np.concatenate([np.full(n0, -1, i32), np.arange(nq, dtype=i32)])
@@ -2256,7 +2723,11 @@ class Viz(QtWidgets.QMainWindow):
         self.live = QtWidgets.QCheckBox("live")
         self.live.setChecked(True)
         self.live.setToolTip("re-run automatically shortly after you stop typing")
-        L.addWidget(_row(self.examples, b_run, self.live))
+        self.into = QtWidgets.QCheckBox("functions")
+        self.into.setChecked(True)
+        self.into.setToolTip("also show the steps inside your own functions")
+        self.into.toggled.connect(lambda _: self.run())
+        L.addWidget(_row(self.examples, b_run, self.live, self.into))
 
         self.editor = CodeEdit()
         self.editor.run_requested.connect(lambda: self.run())
@@ -2445,9 +2916,11 @@ class Viz(QtWidgets.QMainWindow):
         self._run_timer.stop()
         code = self.editor.toPlainText()
         runner = self.runner
+        into = self.into.isChecked()
 
         def job():
             t0 = time.perf_counter()
+            runner.into_funcs = into
             steps, console, err, reused = runner.run(code)
             for i, st in enumerate(steps or []):        # small steps: analyse now so the list shows kinds
                 if st.raw.size <= 200_000:
@@ -2736,7 +3209,9 @@ class Viz(QtWidgets.QMainWindow):
                 else:
                     parts.append(str(next(it)))
             return txt + f"      = {name or 'f'}({pn}[{', '.join(parts)}])"
-        if st.kind == "elementwise":
+        if st.kind == "set" and not st.changed[fi]:
+            return txt + "      (unchanged)"
+        if st.kind in ("elementwise", "set"):
             return txt + f"      was {fmt_val(P[idx])}"
         return txt
 

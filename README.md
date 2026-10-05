@@ -41,14 +41,20 @@ transposes as you like.
 
 - The editor re-runs your code half a second after you stop typing. `np` is already imported.
 - Every array your code creates, or changes in place, gets a row in the step list. Bare
-  expressions like `b.T` count too.
+  expressions like `b.T` count too, and so do arrays kept in lists, dicts or your own objects
+  (`l[0]`, `d['x']`, `box.grid`).
 - Loops are stepped through one pass at a time, so a `for` or `while` loop gets a step for every
-  pass, labelled with the pass it came from (`i=2`, `pass 3`). `if`, `break`, `continue` and
-  `else` work as usual.
+  pass, labelled with the pass it came from (`i=2`, `pass 3`). `if`, `break`, `continue`, `else`,
+  `try`/`except`/`finally` and `with` work as usual.
+- Calls to your own functions are stepped into, so the arrays made inside them get steps too
+  (labelled `in turn()`). Untick "functions" to hide them.
+- An in-place write like `a[1:3] = 0` or `a[a > 3] *= 10` shows which elements changed: they
+  pop out and back in, and the rest stay put. `b, c = np.split(a, 2)` links each result back to
+  `a`.
 - Clicking a step plays the animation. Elements can move in a wave, all at once or one by one,
   and there's a slider for scrubbing through it by hand.
 - Each step gets a label (`RESHAPE`, `REARRANGE`, `SELECT`, `COMBINE`, `COPY`, `REDUCE`,
-  `ELEMENTWISE` or `NEW ARRAY`) and a sentence saying what happened. Underneath are the shape,
+  `SET`, `ELEMENTWISE` or `NEW ARRAY`) and a sentence saying what happened. Underneath are the shape,
   strides, whether it's contiguous, and whether it's a view or a copy.
 - Hovering over a sheet shows its index, its value and where it came from, for example
   `s[3, 1, 0] = 3  <- a[0, 1, 3]`. For reductions you get the slice that was reduced:
@@ -149,9 +155,10 @@ There are twelve built into the examples menu:
 | stack / concatenate | joining along an existing axis or a new one |
 | sum along an axis | which axis disappears, and `keepdims` |
 | rubik's cube | every face turn is `np.rot90` on one slice of a `(3, 3, 3)` cube, and `R U R' U'` six times solves it again |
+| new | loops, steps inside your own functions, in-place writes, unpacking, containers and `try`/`with` |
 | big: 6 million elements | a `(200, 100, 100, 3)` video tensor, transposed, reshaped and averaged |
 
-The [`examples/`](examples) folder has four more (`image_channels.py`, `rubiks_cube.py`,
+The [`examples/`](examples) folder has five more (`image_channels.py`, `new.py`, `rubiks_cube.py`,
 `sorting.py` and `tile_repeat_roll.py`). Open one with `python npviz.py examples/<name>.py`.
 
 ### Transpose vs reshape
@@ -220,13 +227,24 @@ flowchart LR
 npviz parses your code with `ast` and runs it one top-level statement at a time, in a namespace
 that already has `np` in it. After each statement it looks at every variable, and any numeric
 array (or numpy scalar) that's new or has changed becomes a step. Bare expressions like `b.T`
-are evaluated and recorded too.
+are evaluated and recorded too. It also looks one level inside lists, tuples, dicts and objects
+of classes you defined, so `d['x']` or `box.grid` get steps of their own.
 
-`for` and `while` loops (and `if`s) aren't run in one go. npviz runs them itself, pass by pass,
-feeding each statement in the loop body through the same machinery, so every pass gets its own
-steps. The first 100 passes of each loop are stepped through like this, and the rest run in one
-go and show up as a single step. A loop whose `break` or `continue` sits inside a `try` or
-`with` block is run in one go as well.
+`for` and `while` loops, `if`s, `try` blocks and `with` blocks aren't run in one go. npviz runs
+them itself, feeding each statement inside through the same machinery, so every pass of a loop
+gets its own steps. The first 100 passes of each loop are stepped through like this, and the rest
+run in one go and show up as a single step. A loop variable that's just a numpy number (`for x in
+a:` over a 1D array) doesn't get a step of its own each pass.
+
+Your own functions are followed with the same `sys.settrace` hook that enforces the timeout:
+after each line inside a function, npviz compares the function's local arrays with what they
+were before that line. Steps inside functions keep a copy of the array, since nothing else
+protects a function's locals. At most 150 steps per run come from inside functions.
+
+In-place writes get their own label, `SET`. `c[0] = np.rot90(c[0])` is re-run as "a copy of `c`
+with that part replaced", with element ids in place of the values, so elements that only moved
+around are still followed. When the new values didn't come from anywhere (`a[1:3] = 0`,
+`a[a > 3] *= 10`), npviz compares the old and new values to find which elements changed.
 
 A few tricks keep this quicker than it sounds.
 
