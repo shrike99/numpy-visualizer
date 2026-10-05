@@ -46,7 +46,10 @@ s2 = U(s1)
 s3 = R(s2, -1)
 s4 = U(s3, -1)
 
-# do it 6 times and the cube is solved again
+# do it 6 times and the cube is solved again (every turn of every pass is a step)
 back = cube
 for _ in range(6):
-    back = U(R(U(R(back)), -1), -1)
+    back = R(back)
+    back = U(back)
+    back = R(back, -1)
+    back = U(back, -1)

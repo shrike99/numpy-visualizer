@@ -190,10 +190,13 @@ s2 = U(s1)
 s3 = R(s2, -1)
 s4 = U(s3, -1)
 
-# do it 6 times and the cube is solved again
+# do it 6 times and the cube is solved again (every turn of every pass is a step)
 back = cube
 for _ in range(6):
-    back = U(R(U(R(back)), -1), -1)
+    back = R(back)
+    back = U(back)
+    back = R(back, -1)
+    back = U(back, -1)
 """,
     "big: 6 million elements": """\
 rng = np.random.default_rng(0)
@@ -542,6 +545,7 @@ class Step:
     cand: list = field(default_factory=list)   # [(name, step_idx)] candidate source arrays
     env: dict = None           # other variables at that moment (shallow)
     mem: str = ""
+    loop: str = ""             # which pass of the loop(s) around it, e.g. "i=2" or "pass 3"
     # filled in lazily by analyse()
     analysed: bool = False
     kind: str = ""
@@ -719,6 +723,58 @@ def _safety(node):
     return level
 
 
+class _Break(Exception):
+    pass
+
+
+class _Continue(Exception):
+    pass
+
+
+class _Stop(Exception):
+    """a statement raised: the error is already in the console, stop the run."""
+    def __init__(self, line):
+        self.line = line
+
+
+def _escapes(node):
+    """does node hold a break/continue that belongs to a loop around it?"""
+    if isinstance(node, (ast.Break, ast.Continue)):
+        return True
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        return any(_escapes(n) for n in node.orelse)
+    return any(_escapes(n) for n in ast.iter_child_nodes(node))
+
+
+def _steppable(node):
+    """loops are run one pass at a time, unless a break/continue hides in a try/with/... inside them."""
+    return isinstance(node, (ast.For, ast.While)) and _plain_ok(node.body) and _plain_ok(node.orelse)
+
+
+def _plain_ok(body):
+    for n in body:
+        if isinstance(n, ast.If):
+            if not (_plain_ok(n.body) and _plain_ok(n.orelse)):
+                return False
+        elif isinstance(n, (ast.For, ast.While)):
+            if not (_steppable(n) or not _escapes(n)):
+                return False
+        elif not isinstance(n, (ast.Break, ast.Continue)) and _escapes(n):
+            return False
+    return True
+
+
+def _pass_text(target, item, k):
+    """'i=3' for a simple loop variable, otherwise 'pass 4'."""
+    v = item.item() if isinstance(item, np.generic) else item
+    if isinstance(target, ast.Name) and not target.id.startswith("_") and \
+            isinstance(v, (int, float, str, bool)) and len(repr(v)) <= 12:
+        return f"{target.id}={v!r}"
+    return f"pass {k + 1}"
+
+
 def _names_in(node, env):
     out = []
     for n in ast.walk(node):
@@ -739,9 +795,10 @@ class Runner:
     """Runs code statement by statement and records every array change as a Step.
     Keeps the state after every statement, so a re-run only executes from the first changed line."""
 
-    def __init__(self, max_steps=400, timeout=10.0):
+    def __init__(self, max_steps=400, timeout=10.0, max_passes=100):
         self.max_steps = max_steps
         self.timeout = timeout
+        self.max_passes = max_passes     # passes of one loop shown one by one, the rest run in one go
         self.segs, self.snaps, self.steps, self.console = [], [], [], []
 
     def _fresh(self):
@@ -809,7 +866,7 @@ class Runner:
             if len(steps) >= self.max_steps:
                 return None
             cand = [(n, latest[n][1]) for n in src_names if n in latest]
-            st = Step(name, label, line, val, expr=expr, cand=cand, env=before)
+            st = Step(name, label, line, val, expr=expr, cand=cand, env=before, loop=", ".join(ctx))
             st.mem = _mem_note(val, [before[n] for n, _ in cand if n in before], [n for n, _ in cand], inplace) \
                 if cand else "new array"
             steps.append(st)
@@ -835,78 +892,195 @@ class Runner:
                 raise TimeoutError(f"stopped after {self.timeout:.0f} s - is there an infinite loop?")
             return tracer if frame.f_code.co_filename.startswith("line ") else None
 
+        codes = {}
+
+        def compiled(node, mode, line):
+            c = codes.get(id(node))
+            if c is None or c[0] is not node:
+                tree = ast.Expression(node) if mode == "eval" else ast.Module([node], type_ignores=[])
+                c = codes[id(node)] = (node, compile(tree, f"line {line}", mode))
+            return c[1]
+
+        def fail(line, e):
+            flush()
+            console.append(f"line {line}: {type(e).__name__}: {e}")
+            raise _Stop(line)
+
+        def stmt(node, seg, line, show=True, exprs=None):
+            """run one statement and record every array it made or changed -> value of an expression."""
+            before = dict(ns)
+            level = _safety(node)
+            guarded = []
+            if level == "all":
+                guarded = protect([o for o, _ in shared.values()])
+            elif level == "local":
+                names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+                guarded = protect([ns[n] for n in names if isinstance(ns.get(n), np.ndarray)])
+            try:
+                with contextlib.redirect_stdout(out):
+                    if isinstance(node, ast.Expr):
+                        val = eval(compiled(node.value, "eval", line), ns)
+                    else:
+                        exec(compiled(node, "exec", line), ns)
+                        val = None
+            except Exception as e:
+                fail(line, e)
+            flush()
+            if isinstance(node, ast.Expr) and show:
+                v = np.asarray(val) if isinstance(val, np.generic) and not isinstance(val, (np.str_, np.bytes_)) else val
+                if numeric(v):
+                    add(seg if len(seg) <= 24 else "out", seg, line, v, seg, _names_in(node.value, before), before)
+                elif v is not None:
+                    console.append(f"{seg}  ->  {v!r}")
+            # guarded arrays that did NOT change go back to being shared (copy freed)
+            changed_objs = set()
+            for obj, cp, idxs in guarded:
+                if _same(obj, cp):
+                    for i in idxs:
+                        steps[i].raw, steps[i].live = obj, True
+                    shared.setdefault(id(obj), (obj, []))[1].extend(idxs)
+                else:
+                    changed_objs.add(id(obj))
+            # every ndarray variable that is new or changed becomes a step
+            for name, v0 in list(ns.items()):
+                v = None if name.startswith("_") else _as_array(v0)
+                if v is None:
+                    continue
+                if v is not v0:                      # a numpy scalar: compare by the scalar object
+                    old = latest.get(name)
+                    if old is not None and old[2] is v0:
+                        continue
+                old = latest.get(name)
+                if old is not None and old[0] is v and id(v) not in changed_objs:
+                    ost = steps[old[1]]
+                    if level == "safe" or ost.live:
+                        continue                     # can't have changed
+                    if _same(v, ost.raw):            # unchanged: share the live object again
+                        ost.raw, ost.live = v, True
+                        shared.setdefault(id(v), (v, []))[1].append(old[1])
+                        continue
+                expr, src = None, []
+                if exprs and name in exprs:
+                    expr, src = exprs[name]
+                elif isinstance(node, ast.Assign) and len(node.targets) == 1 and \
+                        isinstance(node.targets[0], ast.Name) and node.targets[0].id == name:
+                    expr, src = ast.get_source_segment(code, node.value), _names_in(node.value, before)
+                elif old is not None:
+                    src = [name]
+                i = add(name, seg, line, v, expr, src, before, inplace=old is not None and old[0] is v)
+                if i is not None:
+                    latest[name] = (v, i, v0)
+            for name in [n for n in latest if _as_array(ns.get(n)) is None]:
+                del latest[name]
+            return val
+
+        def evaluate(expr, line, seg):
+            return stmt(ast.copy_location(ast.Expr(expr), expr), seg, line, show=False)
+
+        def head(node):
+            return (ast.get_source_segment(code, node) or "").split("\n")[0].strip()
+
+        def block(body):
+            for node in body:
+                run_node(node)
+
+        def run_node(node):
+            if isinstance(node, ast.Break):
+                raise _Break
+            if isinstance(node, ast.Continue):
+                raise _Continue
+            if isinstance(node, ast.If):
+                block(node.body if evaluate(node.test, node.lineno, head(node)) else node.orelse)
+            elif _steppable(node):
+                loop(node)
+            else:
+                stmt(node, ast.get_source_segment(code, node) or "", node.lineno)
+
+        passes = {}      # loop node -> passes shown one by one so far
+        ctx = []         # the pass of every loop we're inside, for Step.loop
+
+        def loop(node):
+            """run a for/while loop one pass at a time, so every pass gets its own steps."""
+            line, top = node.lineno, head(node)
+            is_for = isinstance(node, ast.For)
+            it = None
+            if is_for:
+                obj = evaluate(node.iter, line, top)
+                try:
+                    it = iter(obj)
+                except Exception as e:
+                    fail(line, e)
+                assign = ast.fix_missing_locations(ast.copy_location(
+                    ast.Assign([node.target], ast.Name("__npviz_item", ast.Load())), node))
+                # for row in a: -> row is a[k], so its step shows where the row came from
+                by_index = isinstance(obj, np.ndarray) and isinstance(node.target, ast.Name) and \
+                    isinstance(node.iter, ast.Name)
+            k = 0
+            while True:
+                if passes.get(id(node), 0) >= self.max_passes or len(steps) >= self.max_steps * 3 // 4:
+                    rest(node, it, k)
+                    return
+                if is_for:
+                    try:
+                        item = next(it)
+                    except StopIteration:
+                        break
+                    except Exception as e:
+                        fail(line, e)
+                elif not evaluate(node.test, line, top):
+                    break
+                passes[id(node)] = passes.get(id(node), 0) + 1
+                ctx.append(_pass_text(node.target, item, k) if is_for else f"pass {k + 1}")
+                try:
+                    if is_for:
+                        ns["__npviz_item"] = item
+                        ex = {node.target.id: (f"{node.iter.id}[{k}]", [node.iter.id])} if by_index else None
+                        stmt(assign, top, line, exprs=ex)
+                    block(node.body)
+                except _Continue:
+                    pass
+                except _Break:
+                    return
+                finally:
+                    ctx.pop()
+                    ns.pop("__npviz_item", None)
+                k += 1
+            block(node.orelse)
+
+        def rest(node, it, k):
+            """the remaining passes of a long loop in one go (one step per array they change)."""
+            flag = ast.Assign([ast.Name("__npviz_else", ast.Store())], ast.Constant(True))
+            if it is not None:
+                ns["__npviz_it"] = it
+                ff = ast.For(node.target, ast.Name("__npviz_it", ast.Load()), node.body, [flag], None)
+            else:
+                ff = ast.While(node.test, node.body, [flag])
+            ast.fix_missing_locations(ast.copy_location(ff, node))
+            ns["__npviz_else"] = False
+            ctx.append(f"passes {k + 1}..end")
+            try:
+                stmt(ff, ast.get_source_segment(code, node) or "", node.lineno)
+            finally:
+                ctx.pop()
+                ns.pop("__npviz_it", None)
+            if ns.pop("__npviz_else", False):
+                block(node.orelse)
+
         old_trace = sys.gettrace()
         sys.settrace(tracer)
         try:
             for si in range(k, len(nodes)):
                 node = nodes[si]
-                seg = segs[si][0]
-                before = dict(ns)
-                level = _safety(node)
-                guarded = []
-                if level == "all":
-                    guarded = protect([o for o, _ in shared.values()])
-                elif level == "local":
-                    names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-                    guarded = protect([ns[n] for n in names if isinstance(ns.get(n), np.ndarray)])
                 try:
-                    with contextlib.redirect_stdout(out):
-                        if isinstance(node, ast.Expr):
-                            val = eval(compile(ast.Expression(node.value), f"line {node.lineno}", "eval"), ns)
-                        else:
-                            exec(compile(ast.Module([node], type_ignores=[]), f"line {node.lineno}", "exec"), ns)
-                            val = None
-                except Exception as e:
-                    flush()
-                    console.append(f"line {node.lineno}: {type(e).__name__}: {e}")
+                    run_node(node)
+                except _Stop as e:
+                    err = e.line
+                    break
+                except (_Break, _Continue) as e:
+                    word = "break" if isinstance(e, _Break) else "continue"
+                    console.append(f"line {node.lineno}: SyntaxError: '{word}' outside loop")
                     err = node.lineno
                     break
-                flush()
-                if isinstance(node, ast.Expr):
-                    if isinstance(val, np.generic) and not isinstance(val, (np.str_, np.bytes_)):
-                        val = np.asarray(val)
-                    if numeric(val):
-                        add(seg if len(seg) <= 24 else "out", seg, node.lineno, val, seg, _names_in(node.value, before), before)
-                    elif val is not None:
-                        console.append(f"{seg}  ->  {val!r}")
-                # guarded arrays that did NOT change go back to being shared (copy freed)
-                changed_objs = set()
-                for obj, cp, idxs in guarded:
-                    if _same(obj, cp):
-                        for i in idxs:
-                            steps[i].raw, steps[i].live = obj, True
-                        shared.setdefault(id(obj), (obj, []))[1].extend(idxs)
-                    else:
-                        changed_objs.add(id(obj))
-                # every ndarray variable that is new or changed becomes a step
-                for name, v0 in list(ns.items()):
-                    v = None if name.startswith("_") else _as_array(v0)
-                    if v is None:
-                        continue
-                    if v is not v0:                      # a numpy scalar: compare by the scalar object
-                        old = latest.get(name)
-                        if old is not None and old[2] is v0:
-                            continue
-                    old = latest.get(name)
-                    if old is not None and old[0] is v and id(v) not in changed_objs:
-                        ost = steps[old[1]]
-                        if level == "safe" or ost.live:
-                            continue                     # can't have changed
-                        if _same(v, ost.raw):            # unchanged: share the live object again
-                            ost.raw, ost.live = v, True
-                            shared.setdefault(id(v), (v, []))[1].append(old[1])
-                            continue
-                    expr, src = None, []
-                    if isinstance(node, ast.Assign) and len(node.targets) == 1 and \
-                            isinstance(node.targets[0], ast.Name) and node.targets[0].id == name:
-                        expr, src = ast.get_source_segment(code, node.value), _names_in(node.value, before)
-                    elif old is not None:
-                        src = [name]
-                    i = add(name, seg, node.lineno, v, expr, src, before, inplace=old is not None and old[0] is v)
-                    if i is not None:
-                        latest[name] = (v, i, v0)
-                for name in [n for n in latest if _as_array(ns.get(n)) is None]:
-                    del latest[name]
                 snaps.append(_Snap(dict(ns), dict(latest), len(steps), len(console)))
         finally:
             sys.settrace(old_trace)
@@ -2338,7 +2512,7 @@ class Viz(QtWidgets.QMainWindow):
 
     def _step_text(self, i):
         s = self.steps[i]
-        return f"L{s.line:<3} {s.name:<8} {str(s.raw.shape):<16} {s.kind if s.analysed else '...'}"
+        return f"L{s.line:<3} {s.name:<8} {str(s.raw.shape):<16} {s.kind if s.analysed else '...':<12} {s.loop}".rstrip()
 
     def _on_step_clicked(self, i):
         if 0 <= i < len(self.steps):
@@ -2372,7 +2546,8 @@ class Viz(QtWidgets.QMainWindow):
             self.editor.setTextCursor(c)
         R = st.raw
         self.what.setText(st.desc if st.analysed else "working out how the elements moved...")
-        self.info.setText(f"{st.name}:  shape {R.shape}   ndim {R.ndim}   size {R.size:,}   dtype {R.dtype}\n"
+        loop = f" ({st.loop})" if st.loop else ""
+        self.info.setText(f"{st.name}{loop}:  shape {R.shape}   ndim {R.ndim}   size {R.size:,}   dtype {R.dtype}\n"
                           f"strides {R.strides} bytes   (C-contiguous {R.flags.c_contiguous})\n{st.mem}")
         self.hover.setText(" ")
         self._shown_sig = _sig(self.steps, i)

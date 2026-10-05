@@ -42,6 +42,9 @@ transposes as you like.
 - The editor re-runs your code half a second after you stop typing. `np` is already imported.
 - Every array your code creates, or changes in place, gets a row in the step list. Bare
   expressions like `b.T` count too.
+- Loops are stepped through one pass at a time, so a `for` or `while` loop gets a step for every
+  pass, labelled with the pass it came from (`i=2`, `pass 3`). `if`, `break`, `continue` and
+  `else` work as usual.
 - Clicking a step plays the animation. Elements can move in a wave, all at once or one by one,
   and there's a slider for scrubbing through it by hand.
 - Each step gets a label (`RESHAPE`, `REARRANGE`, `SELECT`, `COMBINE`, `COPY`, `REDUCE`,
@@ -218,6 +221,12 @@ npviz parses your code with `ast` and runs it one top-level statement at a time,
 that already has `np` in it. After each statement it looks at every variable, and any numeric
 array (or numpy scalar) that's new or has changed becomes a step. Bare expressions like `b.T`
 are evaluated and recorded too.
+
+`for` and `while` loops (and `if`s) aren't run in one go. npviz runs them itself, pass by pass,
+feeding each statement in the loop body through the same machinery, so every pass gets its own
+steps. The first 100 passes of each loop are stepped through like this, and the rest run in one
+go and show up as a single step. A loop whose `break` or `continue` sits inside a `try` or
+`with` block is run in one go as well.
 
 A few tricks keep this quicker than it sounds.
 
